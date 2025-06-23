@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -158,19 +159,40 @@ func watchJobFiles(ctx context.Context, jm *JobManager, jobWg *sync.WaitGroup) {
 	// Add paths to watcher
 	// Store a map of path to its Watch config for easy lookup
 	watchMap := make(map[string]config.Watch)
-
+	globWatchDirs := make(map[string][]string)       // glob pattern -> parent dirs
+	globWatchConfig := make(map[string]config.Watch) // glob pattern -> config.Watch
 	for _, w := range jm.JobConfig.Watch {
-		// fsnotify needs an existing path. If it's a glob, this is more complex.
-		// For now, assume direct paths or directories.
-		// TODO: Handle glob patterns by expanding them or using a library that supports glob watching.
-		// For simplicity, this example assumes w.Path is a concrete file or directory.
-		appLogger.Printf("[%s] Watching path '%s' for changes.", jm.GetName(), w.Path)
-		err = watcher.Add(w.Path)
-		if err != nil {
-			appLogger.Printf("[%s] Error adding path '%s' to watcher: %v", jm.GetName(), w.Path, err)
-			continue
+		paths := []string{w.Path}
+		isGlob := strings.ContainsAny(w.Path, "*?[")
+		if isGlob {
+			matches, err := filepath.Glob(w.Path)
+			if err != nil {
+				appLogger.Printf("[%s] Error expanding glob pattern '%s': %v", jm.GetName(), w.Path, err)
+				continue
+			}
+			if len(matches) == 0 {
+				appLogger.Printf("[%s] Glob pattern '%s' did not match any files.", jm.GetName(), w.Path)
+			}
+			paths = matches
+			parent := filepath.Dir(w.Path)
+			appLogger.Printf("[%s] Watching parent directory '%s' for new files matching glob '%s'", jm.GetName(), parent, w.Path)
+			err = watcher.Add(parent)
+			if err != nil {
+				appLogger.Printf("[%s] Error adding parent dir '%s' to watcher: %v", jm.GetName(), parent, err)
+			} else {
+				globWatchDirs[w.Path] = append(globWatchDirs[w.Path], parent)
+				globWatchConfig[w.Path] = w
+			}
 		}
-		watchMap[w.Path] = w // Simple mapping; might need refinement if paths overlap or are non-canonical
+		for _, p := range paths {
+			appLogger.Printf("[%s] Watching path '%s' for changes.", jm.GetName(), p)
+			err = watcher.Add(p)
+			if err != nil {
+				appLogger.Printf("[%s] Error adding path '%s' to watcher: %v", jm.GetName(), p, err)
+				continue
+			}
+			watchMap[p] = w
+		}
 	}
 
 	if len(watchMap) == 0 {
@@ -187,6 +209,26 @@ func watchJobFiles(ctx context.Context, jm *JobManager, jobWg *sync.WaitGroup) {
 			if !ok {
 				appLogger.Printf("[%s] File watcher events channel closed.", jm.GetName())
 				return
+			}
+			if event.Op&fsnotify.Create == fsnotify.Create {
+				for glob, parents := range globWatchDirs {
+					for _, parent := range parents {
+						if strings.HasPrefix(event.Name, parent) {
+							matched, _ := filepath.Match(glob, event.Name)
+							if matched {
+								if _, already := watchMap[event.Name]; !already {
+									appLogger.Printf("[%s] New file '%s' matches glob '%s', adding to watcher.", jm.GetName(), event.Name, glob)
+									err := watcher.Add(event.Name)
+									if err == nil {
+										watchMap[event.Name] = globWatchConfig[glob] // Use the original watch config
+									} else {
+										appLogger.Printf("[%s] Error adding new file '%s' to watcher: %v", jm.GetName(), event.Name, err)
+									}
+								}
+							}
+						}
+					}
+				}
 			}
 			// fsnotify can send multiple events for a single save (e.g., RENAME, CHMOD, WRITE)
 			// We typically care about WRITE or CREATE.
