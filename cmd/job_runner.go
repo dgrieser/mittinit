@@ -17,15 +17,15 @@ import (
 
 // JobManager holds the state for a running job
 type JobManager struct {
-	JobConfig      *config.Job
-	Cmd            *exec.Cmd
-	running        bool
-	mutex          sync.Mutex
-	cancelFunc     context.CancelFunc
-	stdout         io.WriteCloser
-	stderr         io.WriteCloser
-	logger         *log.Logger
-	jobWg          sync.WaitGroup
+	JobConfig       *config.Job
+	Cmd             *exec.Cmd
+	running         bool
+	mutex           sync.Mutex
+	cancelFunc      context.CancelFunc
+	stdout          io.WriteCloser
+	stderr          io.WriteCloser
+	logger          *log.Logger
+	jobWg           sync.WaitGroup
 	currentAttempts int
 }
 
@@ -131,6 +131,7 @@ func (jm *JobManager) Start(ctx context.Context, overallWg *sync.WaitGroup) {
 		}
 
 		for {
+			var err error
 			jm.currentAttempts++
 			jm.logger.Printf("Starting job %s (attempt %d)...", jm.JobConfig.Name, jm.currentAttempts)
 
@@ -164,7 +165,7 @@ func (jm *JobManager) Start(ctx context.Context, overallWg *sync.WaitGroup) {
 			jm.running = true
 			jm.mutex.Unlock()
 
-			err := jm.Cmd.Start()
+			err = jm.Cmd.Start()
 			if err != nil {
 				jm.logger.Printf("Failed to start job %s: %v", jm.JobConfig.Name, err)
 				jm.closeLogFiles()
@@ -211,7 +212,7 @@ func (jm *JobManager) Start(ctx context.Context, overallWg *sync.WaitGroup) {
 				}
 				return // Stop trying for this job
 			}
-			if jm.JobConfig.MaxAttempts == 0 && jm.currentAttempts >=1 { // Only one attempt if MaxAttempts is 0
+			if jm.JobConfig.MaxAttempts == 0 && jm.currentAttempts >= 1 { // Only one attempt if MaxAttempts is 0
 				jm.logger.Printf("Job %s failed and MaxAttempts is 0. Not retrying.", jm.JobConfig.Name)
 				if !jm.JobConfig.CanFail {
 					jm.logger.Fatalf("Critical job %s failed (MaxAttempts=0). Terminating mittinit.", jm.JobConfig.Name)
@@ -266,7 +267,6 @@ func (jm *JobManager) Wait() {
 	jm.jobWg.Wait()
 }
 
-
 func (jm *JobManager) closeLogFiles() {
 	if closer, ok := jm.stdout.(io.Closer); ok && jm.JobConfig.Stdout != "" {
 		if err := closer.Close(); err != nil {
@@ -279,7 +279,6 @@ func (jm *JobManager) closeLogFiles() {
 		}
 	}
 }
-
 
 // NopWriteCloser wraps an io.Writer to make it an io.WriteCloser with a no-op Close().
 // This is useful when we want to use os.Stdout/os.Stderr but need an io.WriteCloser interface.
@@ -338,7 +337,6 @@ func ExecuteBootJob(bootConfig *config.Boot, appLogger *log.Logger, mainCtx cont
 	} else {
 		err = cmd.Run() // Simpler execution if no timeout
 	}
-
 
 	if outbuf.Len() > 0 {
 		appLogger.Printf("Boot job %s stdout:\n%s", bootConfig.Name, outbuf.String())

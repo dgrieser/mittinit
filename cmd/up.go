@@ -2,18 +2,17 @@ package cmd
 
 import (
 	"context"
-	"fmt"
 	"log"
-	// "mittinit/cmd" // This import seems incorrect if up.go is in package cmd
+
+	"io"
 	"mittinit/config"
-	"net" // Added net for network operations (listeners, proxying)
-	"io"  // Added io for io.Copy
+	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
-	"strings"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
@@ -74,14 +73,12 @@ var upCmd = &cobra.Command{
 
 		jobRunners := make(map[string]*JobManager)
 
-
 		if len(cfg.Jobs) > 0 {
 			appLogger.Printf("Initializing %d regular job(s)...", len(cfg.Jobs))
 			for _, jobConfig := range cfg.Jobs {
 				jm := NewJobManager(jobConfig, appLogger)
 				jobManagers = append(jobManagers, jm)
 				jobRunners[jobConfig.Name] = jm
-
 
 				if jobConfig.Lazy != nil && len(jobConfig.Listen) > 0 {
 					appLogger.Printf("Job %s is configured for lazy loading. Setting up listeners.", jobConfig.Name)
@@ -140,13 +137,11 @@ var upCmd = &cobra.Command{
 			jm.Stop() // Ensure stop is called, it's idempotent
 		}
 		// A small delay to allow final stop signals to be processed if any were missed.
-		time.Sleep(100*time.Millisecond)
-
+		time.Sleep(100 * time.Millisecond)
 
 		appLogger.Println("mittinit shut down.")
 	},
 }
-
 
 func watchJobFiles(ctx context.Context, jm *JobManager, jobWg *sync.WaitGroup) {
 	if len(jm.JobConfig.Watch) == 0 {
@@ -182,7 +177,6 @@ func watchJobFiles(ctx context.Context, jm *JobManager, jobWg *sync.WaitGroup) {
 		appLogger.Printf("[%s] No valid paths found to watch.", jm.GetName())
 		return
 	}
-
 
 	for {
 		select {
@@ -348,7 +342,6 @@ func setupLazyJob(ctx context.Context, jm *JobManager, appWg *sync.WaitGroup) {
 	// Goroutine to manage job cooldown
 	go manageLazyJobCooldown(ctx, jm)
 
-
 	// Wait for all listener goroutines to complete (e.g., on shutdown)
 	listenerWg.Wait()
 	appLogger.Printf("[%s] All listeners for lazy job have shut down.", jm.GetName())
@@ -359,14 +352,12 @@ func setupLazyJob(ctx context.Context, jm *JobManager, appWg *sync.WaitGroup) {
 	appLogger.Printf("[%s] Lazy job supervisor finished.", jm.GetName())
 }
 
-
 var (
 	activeConnections      = make(map[string]int) // Job name to connection count
 	activeConnectionsMutex sync.Mutex
 	lastActivityTime       = make(map[string]time.Time) // Job name to last activity time
 	lastActivityTimeMutex  sync.Mutex
 )
-
 
 func handleLazyConnection(ctx context.Context, clientConn net.Conn, jm *JobManager, forwardAddress string, appWg *sync.WaitGroup) {
 	defer clientConn.Close()
@@ -426,7 +417,7 @@ func handleLazyConnection(ctx context.Context, clientConn net.Conn, jm *JobManag
 		startTime := time.Now()
 		for time.Since(startTime) < spinUpTimeoutDuration {
 			dialCtx, dialCancel := context.WithTimeout(ctx, 100*time.Millisecond)
-			targetConn, err := net.DialContext(dialCtx, "tcp", forwardAddress)
+			targetConn, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", forwardAddress)
 			dialCancel()
 			if err == nil {
 				targetConn.Close()
@@ -485,7 +476,6 @@ func handleLazyConnection(ctx context.Context, clientConn net.Conn, jm *JobManag
 	proxyWg.Wait()
 	appLogger.Printf("[%s] Finished proxying for connection from %s.", jm.GetName(), clientConn.RemoteAddr().String())
 }
-
 
 func manageLazyJobCooldown(ctx context.Context, jm *JobManager) {
 	if jm.JobConfig.Lazy == nil {
