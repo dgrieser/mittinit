@@ -1,4 +1,5 @@
 /.idea
 /mittinit
 /dist
+/test_helpers/output_generator_bin
 *.log

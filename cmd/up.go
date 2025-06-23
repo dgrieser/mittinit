@@ -275,11 +275,8 @@ func setupLazyJob(ctx context.Context, jm *JobManager, appWg *sync.WaitGroup) {
 
 		// Parse listenConfig.Address (e.g. "0.0.0.0:8080" or "tcp://0.0.0.0:8080")
 		// For simplicity, assume "host:port" for now.
-		// TODO: More robust address parsing (protocol, etc.)
 		addr := listenConfig.Address
-		if strings.HasPrefix(addr, "tcp://") {
-			addr = strings.TrimPrefix(addr, "tcp://")
-		}
+		addr = strings.TrimPrefix(addr, "tcp://")
 
 		ln, err := net.Listen("tcp", addr)
 		if err != nil {
