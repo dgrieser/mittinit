@@ -49,26 +49,49 @@ func (jm *JobManager) setupOutputStreams() error {
 			for scanner.Scan() {
 				line := scanner.Text()
 				if jm.JobConfig.EnableTimestamps {
-					tsFormat := time.RFC3339
+					// Default to time.RFC3339 layout string
+					actualLayout := time.RFC3339
+
 					if jm.JobConfig.CustomTimestampFormat != "" {
-						tsFormat = jm.JobConfig.CustomTimestampFormat
+						// User provided a custom Go layout string directly
+						actualLayout = jm.JobConfig.CustomTimestampFormat
 					} else if jm.JobConfig.TimestampFormat != "" {
-						// Map named formats to Go time layout strings
-						// This can be expanded
-						switch jm.JobConfig.TimestampFormat {
-						case "RFC3339Nano":
-							tsFormat = time.RFC3339Nano
-						case "Kitchen":
-							tsFormat = time.Kitchen
-						// Add other common formats as needed
+						// User provided a named format
+						switch strings.ToUpper(jm.JobConfig.TimestampFormat) { // Convert to upper for case-insensitivity
+						case "RFC3339":
+							actualLayout = time.RFC3339
+						case "RFC3339NANO":
+							actualLayout = time.RFC3339Nano
+						case "KITCHEN":
+							actualLayout = time.Kitchen
+						case "ANSIC":
+							actualLayout = time.ANSIC
+						case "RFC1123":
+							actualLayout = time.RFC1123
+						case "RFC1123Z":
+							actualLayout = time.RFC1123Z
+						case "RFC822":
+							actualLayout = time.RFC822
+						case "RFC822Z":
+							actualLayout = time.RFC822Z
+						case "RFC850":
+							actualLayout = time.RFC850
+						case "RUBYDATE":
+							actualLayout = time.RubyDate
+						case "UNIXDATE":
+							actualLayout = time.UnixDate
+						// Add other common time package constants or custom named formats as needed
 						default:
-							// If not a known named format, try to use it directly (e.g. "2006-01-02 15:04:05")
-							// This might be risky if the string is not a valid format.
-							// Consider validating known formats more strictly or parsing them.
-							tsFormat = jm.JobConfig.TimestampFormat
+							// If it's not a known named format, AND CustomTimestampFormat is empty,
+							// we previously used TimestampFormat directly. This was the source of the bug.
+							// Now, if it's not a recognized name, we stick to the initial default (RFC3339)
+							// or log a warning, or allow direct layout via CustomTimestampFormat only.
+							// For simplicity, we'll just fall back to time.RFC3339 if the name isn't recognized.
+							// A warning could be logged here if jm.logger is accessible and it's desired.
+							// jm.logger.Printf("Warning: Unrecognized TimestampFormat '%s' for job %s. Defaulting to RFC3339.", jm.JobConfig.TimestampFormat, jm.JobConfig.Name)
 						}
 					}
-					fmt.Fprintf(baseWriter, "%s [%s] %s\n", time.Now().Format(tsFormat), jm.JobConfig.Name, line)
+					fmt.Fprintf(baseWriter, "%s [%s] %s\n", time.Now().Format(actualLayout), jm.JobConfig.Name, line)
 				} else {
 					fmt.Fprintf(baseWriter, "[%s] %s\n", jm.JobConfig.Name, line)
 				}
@@ -136,8 +159,10 @@ func (jm *JobManager) Start(ctx context.Context, overallWg *sync.WaitGroup) {
 			jm.logger.Printf("Starting job %s (attempt %d)...", jm.JobConfig.Name, jm.currentAttempts)
 
 			jobCtx, cancelFunc := context.WithCancel(ctx)
+			defer cancelFunc() // Ensure this attempt's context is cleaned up
+
 			jm.mutex.Lock()
-			jm.cancelFunc = cancelFunc
+			jm.cancelFunc = cancelFunc // Store it so Stop/Restart can access the current one
 			jm.Cmd = exec.CommandContext(jobCtx, jm.JobConfig.Command, jm.JobConfig.Args...)
 			jm.Cmd.Env = append(os.Environ(), jm.JobConfig.Env...)
 			jm.Cmd.Dir = jm.JobConfig.WorkingDirectory
@@ -297,56 +322,74 @@ func ExecuteBootJob(bootConfig *config.Boot, appLogger *log.Logger, mainCtx cont
 	appLogger.Printf("Starting boot job %s: %s %s", bootConfig.Name, bootConfig.Command, strings.Join(bootConfig.Args, " "))
 
 	var cmd *exec.Cmd
-	cmd.Env = append(os.Environ(), bootConfig.Env...)
-	// Consider adding WorkingDirectory to Boot struct if needed
-	// cmd.Dir = bootConfig.WorkingDirectory
+	var jobCtx context.Context
+	var cancel context.CancelFunc
 
-	// Capture output for logging
-	var outbuf, errbuf strings.Builder
-	cmd.Stdout = &outbuf
-	cmd.Stderr = &errbuf
-
-	var err error
 	if bootConfig.Timeout != "" {
 		timeout, parseErr := time.ParseDuration(bootConfig.Timeout)
 		if parseErr != nil {
 			return fmt.Errorf("failed to parse timeout for boot job %s: %w", bootConfig.Name, parseErr)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		jobCtx, cancel = context.WithTimeout(mainCtx, timeout) // Use mainCtx as parent
 		defer cancel()
-		cmd = exec.CommandContext(ctx, bootConfig.Command, bootConfig.Args...)
-		cmd.Env = append(os.Environ(), bootConfig.Env...)
-		cmd.Stdout = &outbuf
-		cmd.Stderr = &errbuf
-
-		err = cmd.Start()
-		if err == nil {
-			err = cmd.Wait()
-		}
-
-		if ctx.Err() == context.DeadlineExceeded {
-			appLogger.Printf("Boot job %s timed out after %s.", bootConfig.Name, bootConfig.Timeout)
-			if cmd.Process != nil {
-				// Attempt to kill the process if it's still running
-				if killErr := cmd.Process.Kill(); killErr != nil {
-					appLogger.Printf("Failed to kill timed-out boot job %s: %v", bootConfig.Name, killErr)
-				}
-			}
-			return fmt.Errorf("boot job %s timed out", bootConfig.Name)
-		}
 	} else {
-		err = cmd.Run() // Simpler execution if no timeout
+		jobCtx, cancel = context.WithCancel(mainCtx) // Allow cancellation even without timeout
+		defer cancel()
 	}
 
-	if outbuf.Len() > 0 {
-		appLogger.Printf("Boot job %s stdout:\n%s", bootConfig.Name, outbuf.String())
-	}
-	if errbuf.Len() > 0 {
-		appLogger.Printf("Boot job %s stderr:\n%s", bootConfig.Name, errbuf.String())
-	}
+	cmd = exec.CommandContext(jobCtx, bootConfig.Command, bootConfig.Args...)
+	cmd.Env = append(os.Environ(), bootConfig.Env...)
+	// Consider adding WorkingDirectory to Boot struct if needed
+	// cmd.Dir = bootConfig.WorkingDirectory
 
+	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("boot job %s failed: %w. Stderr: %s", bootConfig.Name, err, errbuf.String())
+		return fmt.Errorf("failed to get stdout pipe for boot job %s: %w", bootConfig.Name, err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get stderr pipe for boot job %s: %w", bootConfig.Name, err)
+	}
+
+	var wg sync.WaitGroup
+	processOutput := func(pipe io.ReadCloser, streamName string) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			scanner := bufio.NewScanner(pipe)
+			for scanner.Scan() {
+				appLogger.Printf("[%s %s] %s", bootConfig.Name, streamName, scanner.Text())
+			}
+			if err := scanner.Err(); err != nil {
+				appLogger.Printf("Error reading %s for boot job %s: %v", streamName, bootConfig.Name, err)
+			}
+		}()
+	}
+
+	processOutput(stdoutPipe, "stdout")
+	processOutput(stderrPipe, "stderr")
+
+	err = cmd.Start()
+	if err != nil {
+		return fmt.Errorf("failed to start boot job %s: %w", bootConfig.Name, err)
+	}
+
+	// Wait for command to finish
+	cmdErr := cmd.Wait()
+
+	// Wait for output processing to complete
+	wg.Wait()
+
+	if jobCtx.Err() == context.DeadlineExceeded {
+		appLogger.Printf("Boot job %s timed out after %s.", bootConfig.Name, bootConfig.Timeout)
+		// cmd.Process.Kill() is handled by CommandContext on timeout
+		return fmt.Errorf("boot job %s timed out", bootConfig.Name)
+	}
+
+	if cmdErr != nil {
+		// Log the error, including stderr which is now streamed.
+		// The error from cmd.Wait() might already include some info.
+		return fmt.Errorf("boot job %s failed: %w", bootConfig.Name, cmdErr)
 	}
 
 	appLogger.Printf("Boot job %s completed successfully.", bootConfig.Name)
