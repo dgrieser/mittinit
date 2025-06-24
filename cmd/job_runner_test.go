@@ -85,27 +85,23 @@ func TestMain(m *testing.M) {
 	helperSource := filepath.Join(projectRoot, "test_helpers", "output_generator", "main.go")
 	helperBinary := filepath.Join(projectRoot, "test_helpers", "output_generator_bin")
 
-	// Check if helper binary exists
-	_, err := os.Stat(helperBinary)
-	if os.IsNotExist(err) {
-		fmt.Printf("Test helper binary not found. Building: %s -> %s\n", helperSource, helperBinary)
-		// Ensure the target directory exists
-		if err := os.MkdirAll(filepath.Dir(helperBinary), 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to create directory for test helper: %v\n", err)
-			os.Exit(1)
-		}
+	// Always rebuild the helper to ensure it's up-to-date with any changes.
+	fmt.Printf("Building/Rebuilding test helper: %s -> %s\n", helperSource, helperBinary)
+	if err := os.MkdirAll(filepath.Dir(helperBinary), 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create directory for test helper: %v\n", err)
+		os.Exit(1)
+	}
 
-		buildCmd := exec.Command("go", "build", "-o", helperBinary, helperSource)
-		buildCmd.Stdout = os.Stdout
-		buildCmd.Stderr = os.Stderr
-		// buildCmd.Dir = projectRoot // Run 'go build' from project root
-		errBuild := buildCmd.Run()
-		if errBuild != nil {
-			fmt.Fprintf(os.Stderr, "Failed to build test_helpers/output_generator_bin: %v\n", errBuild)
-			// os.Exit(1) // Exit if helper is critical for many tests
-		} else {
-			fmt.Println("Test helper built successfully.")
-		}
+	buildCmd := exec.Command("go", "build", "-o", helperBinary, helperSource)
+	buildCmd.Stdout = os.Stdout // Keep these for visibility during test runs
+	buildCmd.Stderr = os.Stderr
+	// buildCmd.Dir = projectRoot // Not strictly necessary if helperSource is absolute or relative to project root
+	errBuild := buildCmd.Run()
+	if errBuild != nil {
+		fmt.Fprintf(os.Stderr, "Failed to build test_helpers/output_generator_bin: %v\n", errBuild)
+		os.Exit(1) // Helper is critical, exit if build fails
+	} else {
+		fmt.Println("Test helper built/rebuilt successfully.")
 	}
 
 	exitCode := m.Run()
@@ -178,38 +174,8 @@ func TestJobManager_Start_Stop_SuccessfulCommand(t *testing.T) {
 }
 
 func TestJobManager_Start_FailingCommand_WithRetries(t *testing.T) {
-	if os.Getenv("GO_TEST_MODE_RETRY") == "1" { // In child process
-		filePath := os.Getenv("ATTEMPT_COUNTER_FILE")
-		failUntilTarget := 0 // How many executions until success
-		fmt.Sscan(os.Getenv("FAIL_UNTIL_ATTEMPT"), &failUntilTarget)
-
-		currentExecution := 1 // Default to 1st execution
-		content, err := os.ReadFile(filePath)
-		if err == nil { // If file exists, read current execution count
-			fmt.Sscan(string(content), &currentExecution)
-		}
-
-		// Output for debugging in test logs
-		fmt.Fprintf(os.Stdout, "Child GO_TEST_MODE_RETRY: execution %d, target success on execution #%d, pid %d\n", currentExecution, failUntilTarget, os.Getpid())
-
-		exitCode := 1
-		if currentExecution >= failUntilTarget { // Succeed if current execution is the target success attempt
-			fmt.Fprintf(os.Stdout, "Child GO_TEST_MODE_RETRY: Succeeded on execution %d\n", currentExecution)
-			exitCode = 0
-		} else {
-			fmt.Fprintf(os.Stderr, "Child GO_TEST_MODE_RETRY: Failed on execution %d, will retry\n", currentExecution)
-		}
-
-		// Write the *next* execution number to the file, regardless of success/fail this time
-		// This ensures the counter increments for the *next time this child logic is run*.
-		if err := os.WriteFile(filePath, []byte(fmt.Sprintf("%d", currentExecution+1)), 0644); err != nil {
-			// If we can't write the counter, the test might get stuck. Log and potentially exit differently.
-			fmt.Fprintf(os.Stderr, "Child GO_TEST_MODE_RETRY: Error writing attempt counter file %s: %v\n", filePath, err)
-			// os.Exit(255) // Special exit code if counter fails
-		}
-		os.Exit(exitCode)
-		return
-	}
+	// Child process logic via os.Args[0] and GO_TEST_MODE_RETRY removed.
+	// The test will now use output_generator_bin with new flags.
 
 	// In parent test process
 	t.Parallel()
@@ -218,91 +184,47 @@ func TestJobManager_Start_FailingCommand_WithRetries(t *testing.T) {
 	stdoutPath := filepath.Join(tmpDir, "retry_stdout.log")
 
 	maxAttempts := 3
+	attemptCounterFile := filepath.Join(tmpDir, "attempt.count")
+	defer os.Remove(attemptCounterFile) // Clean up
+
+	// Determine path to output_generator_bin relative to project root
+	wd, _ := os.Getwd()
+	projectRoot := wd
+	if strings.HasSuffix(strings.ToLower(wd), "cmd") {
+		projectRoot = filepath.Dir(wd)
+	}
+	helperBinary := filepath.Join(projectRoot, "test_helpers", "output_generator_bin")
+
 
 	jobConfig := &config.Job{
 		Name:        "retry_job",
-		Command:     os.Args[0], // Re-run the test binary
-		Args:        []string{},
+		Command:     helperBinary,
+		Args: []string{
+			"-attempt-counter-file=" + attemptCounterFile,
+			"-fail-until-attempt=3",
+			// Add other args for output_generator_bin if needed, e.g., to make it quiet
+			"-lines=0", // Don't want its usual "aaaa" output for this test
+			"-stderr-lines=0",
+		},
 		MaxAttempts: maxAttempts,
 		Stdout:      stdoutPath,
-		CanFail:     false,
+		CanFail:     false, // Job is critical, should lead to Fatalf if all retries fail
 	}
+
+	// Ensure the counter file is reset at the beginning of the test (or for the first actual attempt)
+	// The output_generator will create/increment it. If it starts empty, first execution is 1.
+	// It's important that if the test runs multiple times (e.g. go test -count X), this file is clean.
+	// t.TempDir() handles cleaning the directory, but the file state for retries needs to be managed.
+	// The output_generator logic (currentExecution := 1 if file read fails) handles initialization.
+
 
 	// This logger will write to t.Logf, making it visible with `go test -v`
 	logger := log.New(&testLogWriter{t: t}, fmt.Sprintf("[%s] ", jobConfig.Name), 0)
 	jm := NewJobManager(jobConfig, logger)
 
-	// The Start method will set these env vars for each attempt.
-	// We need to ensure the test's child process logic correctly uses them.
-	// The JobManager's Start loop itself handles attempts and does not rely on child changing env.
-	// The child process needs to know which attempt it is. Let's pass it via an arg or specific env.
-	// Simpler: the child always fails N-1 times then succeeds. Parent's MaxAttempts handles it.
+	// No longer need to set GO_TEST_MODE_RETRY or other env vars for the child process mode
 
-	// For this test, the child process will be started multiple times.
-	// The parent (this test) will control the environment for each start.
-	// We need a way for the child to know "how many times it's supposed to fail before succeeding".
-	// Let's modify the child logic: it will succeed on the 3rd call if parent sets MaxAttempts=3.
-	// The parent doesn't set FAIL_COUNT. The child uses its own counter or relies on MaxAttempts.
-	// This is getting complicated. Let's simplify the child:
-	// Child: if env "SUCCEED_THIS_ATTEMPT" is "true", exit 0, else exit 1.
-	// Parent: in jm.Start, before cmd.Start(), set this env var based on currentAttempt.
-	// This requires modifying JobManager.Start which is not ideal for a test.
-
-	// Alternative: The child process (os.Args[0] with GO_TEST_MODE_RETRY=1)
-	// writes its attempt number to a file. The test checks this file.
-	// Or, the child determines success based on an external signal/file.
-	// Let's stick to the original simple child logic: it fails a fixed number of times, then succeeds.
-	// The parent's `MaxAttempts` should align with this.
-	// If child fails twice then succeeds (total 3 runs), MaxAttempts should be 3.
-
-	// The child part:
-	// os.Getenv("GO_TEST_MODE_RETRY") == "1"
-	//   fail_counter_file := "fail_count.txt"
-	//   count := read from fail_counter_file (default 0)
-	//   if count < 2 { print "failing"; write count+1 to file; exit 1 }
-	//   else { print "succeeding"; delete file; exit 0 }
-	// This stateful file-based approach is robust for retries.
-
-	attemptCounterFile := filepath.Join(tmpDir, "attempt.count")
-	defer os.Remove(attemptCounterFile) // Clean up
-
-	// Adjust jobConfig.Args or Env for the child to find this file
-	jobConfig.Env = append(os.Environ(),
-		"GO_TEST_MODE_RETRY=1",
-		"ATTEMPT_COUNTER_FILE="+attemptCounterFile,
-		"FAIL_UNTIL_ATTEMPT=3", // Child should succeed on its 3rd execution.
-	)
-
-
-	// Child logic for GO_TEST_MODE_RETRY=1 (conceptual, needs to be in output_generator or similar if not self-test)
-	// For self-test:
-	if os.Getenv("GO_TEST_MODE_RETRY") == "1" { // This block is actually unreachable here, it's for the child
-		filePath := os.Getenv("ATTEMPT_COUNTER_FILE")
-		failUntil := 0
-		fmt.Sscan(os.Getenv("FAIL_UNTIL_ATTEMPT"), &failUntil)
-
-		currentAttempt := 1
-		content, err := os.ReadFile(filePath)
-		if err == nil {
-			fmt.Sscan(string(content), &currentAttempt)
-			currentAttempt++
-		}
-		os.WriteFile(filePath, []byte(fmt.Sprintf("%d", currentAttempt)), 0644)
-
-		fmt.Fprintf(os.Stdout, "Child: execution %d, fail_until %d, pid %d\n", currentAttempt, failUntil, os.Getpid())
-		if currentAttempt >= failUntil {
-			fmt.Fprintf(os.Stdout, "Child: Succeeded on attempt %d\n", currentAttempt)
-			os.Exit(0)
-		} else {
-			fmt.Fprintf(os.Stderr, "Child: Failed on attempt %d, will retry\n", currentAttempt)
-			os.Exit(1)
-		}
-		return
-	}
-	// End of conceptual child logic for GO_TEST_MODE_RETRY=1
-
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second) // Increased timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second) // Timeout for all attempts
 	defer cancel()
 
 	var overallWg sync.WaitGroup
@@ -321,35 +243,38 @@ func TestJobManager_Start_FailingCommand_WithRetries(t *testing.T) {
 		t.Fatalf("Failed to read stdout: %v. Log was:\n%s", err, string(contentBytes))
 	}
 	stdoutContent := string(contentBytes)
-	expectedSuccessMessage := fmt.Sprintf("Child GO_TEST_MODE_RETRY: Succeeded on execution %d", maxAttempts)
+	// Expected message from output_generator_bin in retry mode on successful attempt
+	expectedSuccessMessage := fmt.Sprintf("OUTPUT_GENERATOR_RETRY_MODE: Succeeded on execution %d", maxAttempts)
 	if !strings.Contains(stdoutContent, expectedSuccessMessage) {
-		t.Errorf("Expected successful attempt log message containing '%s', got: %s", expectedSuccessMessage, stdoutContent)
+		t.Errorf("Expected successful attempt log message in job's stdout containing '%s', got: %s", expectedSuccessMessage, stdoutContent)
 	}
 	if jm.running {
-		t.Errorf("Job should not be running after successful completion.")
+		t.Errorf("Job should not be running after successful completion. Check JobManager logs in verbose test output.")
 	}
 }
 
 
 func TestJobManager_Start_MaxAttemptsExceeded(t *testing.T) {
 	if os.Getenv("GO_TEST_MODE_FAIL_ALWAYS") == "1" {
-		fmt.Fprintf(os.Stderr, "Failing intentionally, pid %d\n", os.Getpid())
+		// fmt.Fprintf(os.Stderr, "Failing intentionally, pid %d\n", os.Getpid()) // Comment out to see if it affects exit timing
 		os.Exit(1)
 		return
 	}
-	t.Parallel()
+	// t.Parallel() // Temporarily remove t.Parallel() for debugging this test
 
 	jobConfig := &config.Job{
 		Name:        "fail_always_job",
-		Command:     os.Args[0],
+		Command:     "/bin/false", // Use /bin/false for a simple, quick failure
 		Args:        []string{},
 		MaxAttempts: 2,
 		CanFail:     true,
 	}
 	// logger := log.New(&testLogWriter{t: t}, fmt.Sprintf("[%s] ", jobConfig.Name), 0)
-	logger := newTestLogger(t)
+	// logger := newTestLogger(t) // Original discarding logger
+	var logOutput strings.Builder
+	logger := log.New(&logOutput, fmt.Sprintf("[%s_jm_log] ", jobConfig.Name), log.LstdFlags|log.Lmicroseconds)
 	jm := NewJobManager(jobConfig, logger)
-	jm.JobConfig.Env = append(os.Environ(), "GO_TEST_MODE_FAIL_ALWAYS=1")
+	// jm.JobConfig.Env = append(os.Environ(), "GO_TEST_MODE_FAIL_ALWAYS=1") // No longer needed
 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second) // Increased timeout
@@ -362,10 +287,10 @@ func TestJobManager_Start_MaxAttemptsExceeded(t *testing.T) {
 	jm.Wait()
 
 	if jm.currentAttempts != 2 {
-		t.Errorf("Expected 2 attempts, got %d", jm.currentAttempts)
+		t.Errorf("Expected 2 attempts, got %d. Logs:\n%s", jm.currentAttempts, logOutput.String())
 	}
 	if jm.running {
-		t.Error("Job should not be running after max attempts exceeded")
+		t.Errorf("Job should not be running after max attempts exceeded. Attempts: %d. Logs:\n%s", jm.currentAttempts, logOutput.String())
 	}
 }
 

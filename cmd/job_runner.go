@@ -26,6 +26,7 @@ type JobManager struct {
 	stderr          io.WriteCloser
 	logger          *log.Logger
 	jobWg           sync.WaitGroup
+	ioWg            sync.WaitGroup // For tracking I/O goroutines
 	currentAttempts int
 }
 
@@ -44,7 +45,9 @@ func (jm *JobManager) GetName() string {
 func (jm *JobManager) setupOutputStreams() error {
 	var err error
 	handleOutput := func(pipe io.ReadCloser, baseWriter io.Writer, streamName string) {
+		jm.ioWg.Add(1) // Add to JobManager's WaitGroup
 		go func() {
+			defer jm.ioWg.Done() // Decrement when goroutine finishes
 			scanner := bufio.NewScanner(pipe)
 			for scanner.Scan() {
 				line := scanner.Text()
@@ -198,12 +201,16 @@ func (jm *JobManager) Start(ctx context.Context, overallWg *sync.WaitGroup) {
 			}
 
 			jm.logger.Printf("Job %s started successfully (PID: %d).", jm.JobConfig.Name, jm.Cmd.Process.Pid)
+
 			err = jm.Cmd.Wait() // Wait for the job to complete
+			jm.ioWg.Wait()      // Wait for I/O goroutines to finish processing all output
 			jm.closeLogFiles()
 
 			jm.mutex.Lock()
 			jm.running = false
 			jm.mutex.Unlock()
+			// This log should be outside the loop, or the main defer for the goroutine
+			// For now, let's remove this specific debug log as it's not in the right place.
 
 			if err != nil {
 				if jobCtx.Err() == context.Canceled {
@@ -357,11 +364,19 @@ func ExecuteBootJob(bootConfig *config.Boot, appLogger *log.Logger, mainCtx cont
 		go func() {
 			defer wg.Done()
 			scanner := bufio.NewScanner(pipe)
+			scanCount := 0
 			for scanner.Scan() {
 				appLogger.Printf("[%s %s] %s", bootConfig.Name, streamName, scanner.Text())
+				scanCount++
+			}
+			// Log if we never even got to scan once, but also check scanner.Err()
+			if scanCount == 0 {
+				// This might indicate the pipe was closed before any scan opportunity
+				// appLogger.Printf("Debug: scanner for %s of %s found no lines.", streamName, bootConfig.Name)
 			}
 			if err := scanner.Err(); err != nil {
-				appLogger.Printf("Error reading %s for boot job %s: %v", streamName, bootConfig.Name, err)
+				// Log the error, but also consider if scanCount is 0, this error is expected if pipe closed early.
+				appLogger.Printf("Error reading %s for boot job %s (scanned %d lines): %v", streamName, bootConfig.Name, scanCount, err)
 			}
 		}()
 	}

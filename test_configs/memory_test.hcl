@@ -10,15 +10,15 @@ job "memory_hog" {
   max_attempts = 1
   can_fail = false
   enable_timestamps = true
-  stdout = "/tmp/memory_hog_stdout.log"
-  stderr = "/tmp/memory_hog_stderr.log"
+  stdout = "{{TEMP_MEMHOG_STDOUT}}"
+  stderr = "{{TEMP_MEMHOG_STDERR}}"
 }
 
 job "do_nothing_long" {
   command = "/bin/sleep"
-  args = ["300"] // Runs for 5 minutes
+  args = ["1"] // Shortened for tests
   max_attempts = 1
   enable_timestamps = true
-  stdout = "/tmp/do_nothing_stdout.log"
-  stderr = "/tmp/do_nothing_stderr.log"
+  stdout = "{{TEMP_DONOTHING_STDOUT}}"
+  stderr = "{{TEMP_DONOTHING_STDERR}}"
 }

@@ -1,41 +1,41 @@
 job "example_server" {
-  command = "/usr/local/bin/server"
-  args    = ["--port", "8080", "--host", "0.0.0.0"]
-  max_attempts = 3
+  command = "./test_helpers/output_generator_bin" # Testable command
+  args    = ["-lines=1", "-length=5"] # Removed unsupported flags: -prefix, -check-pwd, -env
+  max_attempts = 2 # Keep low for tests
   can_fail = false
-  working_directory = "/srv/app"
+  working_directory = "{{TEST_WORKING_DIR}}" # Placeholder for test-specific temp dir
   env = [
-    "FOO=bar",
-    "GODEBUG=http2debug=1",
+    "FOO=bar_test",
+    "GODEBUG=http2debug_test=1",
   ]
-  stdout = "/var/log/server.out"
-  stderr = "/var/log/server.err"
+  stdout = "{{TEMP_SERVER_OUT}}" # Placeholder
+  stderr = "{{TEMP_SERVER_ERR}}" # Placeholder
   enable_timestamps = true
-  timestamp_format = "RFC3339Nano" // Example of a non-default format
+  timestamp_format = "RFC3339Nano"
 
   watch "config_file" {
-    path = "/etc/server/config.json"
+    path = "{{WATCH_TARGET_FILE}}" # Placeholder
     signal = 1 // SIGHUP
     restart = true
     pre_command {
-      command = "/usr/local/bin/validate_config"
-      args = ["/etc/server/config.json"]
+      command = "/bin/echo" # Testable pre-command
+      args = ["Pre-command for watch executed for {{WATCH_TARGET_FILE}}"]
     }
   }
 
   lazy {
-    spin_up_timeout = "15s"
-    cool_down_timeout = "10m"
+    spin_up_timeout = "5s" # Shorter for tests
+    cool_down_timeout = "10s" # Shorter for tests
   }
 
   listen "http" {
-    address = "tcp://:8000"
-    forward = "tcp://127.0.0.1:8080"
+    address = "tcp://:{{TEST_LISTEN_PORT}}" # Placeholder for dynamic port
+    forward = "tcp://127.0.0.1:{{TEST_FORWARD_PORT}}" # Placeholder
   }
 }
 
 job "another_job" {
-  command = "echo"
+  command = "/bin/echo"
   args    = ["Hello from another job"]
   max_attempts = 0 // Default or no retries
   can_fail = true

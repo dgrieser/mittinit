@@ -14,8 +14,8 @@ job "echo_once" {
 }
 
 job "echo_timestamp" {
-  command = "/bin/sleep"
-  args = ["2"] // Keep it short for testing
+  command = "/bin/echo"
+  args = ["Custom timestamp test line one", "Another line for custom timestamp"] // Keep it short for testing
   enable_timestamps = true
   custom_timestamp_format = "2006-01-02_15:04:05.000"
   stdout = "/tmp/mittinit_echo_custom.log"
