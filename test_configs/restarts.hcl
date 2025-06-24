@@ -11,5 +11,5 @@ job "failing_job_canfail" {
   max_attempts = 2
   can_fail = true // Mittinit should NOT exit
   enable_timestamps = true
-  stdout = "/tmp/mittinit_canfail.log"
+  stdout = "{{TEMP_CANFAIL_STDOUT}}"
 }
